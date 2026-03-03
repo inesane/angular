@@ -209,12 +209,6 @@ export class Driver implements Debuggable, UpdateSource {
       return;
     }
 
-    // Calls range request handler
-    if (req.headers.has('range')) {
-      event.respondWith(this.handleRangeRequest(req));
-      return;
-    }
-
     // The only thing that is served unconditionally is the debug page.
     if (requestUrlObj.path === this.ngswStatePath) {
       // Allow the debugger to handle the request, but don't affect SW state in any other way.
@@ -262,6 +256,12 @@ export class Driver implements Debuggable, UpdateSource {
       return;
     }
 
+    // Handle range requests after safety guards have run
+    if (req.headers.has('range')) {
+      event.respondWith(this.handleRangeRequest(req));
+      return;
+    }
+
     // Past this point, the SW commits to handling the request itself. This could still
     // fail (and result in `state` being set to `SAFE_MODE`), but even in that case the
     // SW will still deliver a response.
@@ -272,6 +272,12 @@ export class Driver implements Debuggable, UpdateSource {
   private async handleRangeRequest(req: Request): Promise<Response> {
     try {
       const response = await fetch(req);
+
+      // If upstream already honored the range, pass it through as-is.
+      if (response.status === 206 || !response.ok) {
+        return response;
+      }
+
       const contentType = response.headers.get('Content-Type');
 
       // Only apply logic to content that is a video
@@ -300,15 +306,20 @@ export class Driver implements Debuggable, UpdateSource {
 
       const buffer = await response.arrayBuffer();
       const contentLength = buffer.byteLength;
+      const lastByte = end !== undefined ? Math.min(end, contentLength - 1) : contentLength - 1;
 
-      const chunk = buffer.slice(start, end ? end + 1 : contentLength);
+      if (start >= contentLength || lastByte < start) {
+        return new Response(null, {
+          status: 416,
+          statusText: 'Range Not Satisfiable',
+        });
+      }
+
+      const chunk = buffer.slice(start, lastByte + 1);
       const chunkLength = chunk.byteLength;
 
       const headers = new Headers(response.headers);
-      headers.set(
-        'Content-Range',
-        `bytes ${start}-${end ? end : contentLength - 1}/${contentLength}`,
-      );
+      headers.set('Content-Range', `bytes ${start}-${lastByte}/${contentLength}`);
       headers.set('Content-Length', chunkLength.toString());
       headers.set('Accept-Ranges', 'bytes');
 
